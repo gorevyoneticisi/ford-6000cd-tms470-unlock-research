@@ -1,0 +1,30 @@
+SNIFFER: COM7, CAN set to 125000 bps. Power-cycle the radio now.
+[  0.105] MSG b'TMB2'
+[  0.105] MSG b'CAN 125000 ok'
+[  3.008] ... 0 frames so far
+[  6.026] ... 0 frames so far
+[  9.046] ... 0 frames so far
+[ 12.060] ... 0 frames so far
+[ 15.071] ... 0 frames so far
+[ 18.088] ... 0 frames so far
+[ 21.103] ... 0 frames so far
+[ 24.117] ... 0 frames so far
+[ 27.128] ... 0 frames so far
+[ 30.144] ... 0 frames so far
+[ 33.153] ... 0 frames so far
+[ 36.169] ... 0 frames so far
+[ 39.186] ... 0 frames so far
+[ 42.206] ... 0 frames so far
+[ 45.223] ... 0 frames so far
+[ 48.242] ... 0 frames so far
+[ 51.255] ... 0 frames so far
+[ 54.269] ... 0 frames so far
+[ 57.280] ... 0 frames so far
+[ 60.297] ... 0 frames so far
+[ 63.306] ... 0 frames so far
+[ 66.318] ... 0 frames so far
+[ 69.331] ... 0 frames so far
+[ 72.346] ... 0 frames so far
+[ 75.357] ... 0 frames so far
+
+[killed]
