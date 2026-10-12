@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+build/
+*.elf
+*.map
+# a local copy of jakka351's keybag, if you add one - see README.md references
+security/bruteforcer_security.cs
+# your own recovered secret - never commit a real one, see unlock_and_read.py
+security/found_secret.txt
