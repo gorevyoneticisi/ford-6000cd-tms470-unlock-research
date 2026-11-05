@@ -1,152 +1,274 @@
 # Ford 6000CD (Visteon, TMS470) unlock research
 
-I have a Ford 6000CD radio (Visteon, part no. `6M2T-18C815-AG`) out of a 2012 Ford Galaxy
-Mk3, permanently stuck on `LOCKED`. I know the correct code (`9777`, confirmed independently
-against a serial-to-code calculator, that part was never the mystery), but a 6000CD past
-this point ignores code entry entirely. Getting back in means resetting an internal attempt
-counter that lives inside the radio's own processor, not anywhere reachable from the front
-panel.
+**Resolved.** The radio is unlocked for good, it is back in the car, and it works
+flawlessly. This repo is the record of how I got there: about a month of work, three
+dead ends, two bricks I had to undo myself, and an answer that was sitting in the
+chip everyone dismissed in week one.
 
-Commercial tools clear this in seconds (OBDSTAR DC706, CarProTool, the genuine Visteon/Ford
-dealer cable), but they're built around proprietary keys only the tool vendors have, and
-this is a dead 2007-era chip from a long-discontinued radio, not worth paying real money to
-unlock. So the goal became: see how far this gets with nothing but public documentation and
-a few cheap microcontrollers.
+I own this radio. It came out of a 2012 Ford Galaxy Mk3 (part no. `6M2T-18C815-AG`,
+board `VISTEON PWB 14041`) stuck on `LOCKED`, ignoring code entry completely. Not
+"wrong code": the radio refuses entry entirely. The code itself (`9777`) was never a
+mystery, it matches the serial through a calculator. The unit had simply been
+power-cycled one time too many, and past that point a 6000CD stops counting attempts
+and just locks you out.
 
-I did the hands-on hardware work myself, soldering, wiring, running every experiment on the
-actual radio. Claude (Anthropic's AI coding agent) wrote the tooling and ran the protocol
-analysis alongside me. This repo and `DOCUMENTATION.md` are the record of that, kept as we
-went so the work could pick back up without starting over.
+Commercial tools clear this in seconds, but they are closed, priced per use, and
+built on proprietary knowledge. This is a 2007-era board from a discontinued radio,
+so I did it the hard way instead: public documentation, an ESP32, a Pico, an FT232H,
+and a lot of logging. I did the hardware work myself. Claude (Anthropic's AI coding
+agent) wrote the tooling and ran protocol analysis alongside me; this repo and
+`DOCUMENTATION.md` are the working record we kept as things happened.
 
-## What this is
+If your own radio is locked and you found this page: the fix that actually worked is
+in section 8, and I've written it up so an owner can follow it. If you want to know
+what doesn't work, that's most of this writeup, and I kept every failure in on
+purpose.
 
-An attempt to read or reset that lock using only open tools: a DIY ESP32 CAN adapter, a
-Raspberry Pi Pico acting as a fake EEPROM, an FT232H for JTAG, and a logic
-analyzer/multimeter for probing the board directly. No commercial diagnostic tool was used
-against the radio itself. `DOCUMENTATION.md` section 6 covers what I learned about how the
-commercial Visteon radio tool ("fordradv3") talks to the radio, from watching it run, not
-from copying its code.
+## 1. The problem
 
-## What I've actually got working
+A locked 6000CD gives you nothing: no code prompt, no error, just the word `LOCKED`.
+The lock state has to live somewhere the front panel cannot reach, so my question
+from day one was where. Three candidate locations: the processor's internal flash,
+its SRAM, or the external 24C16 EEPROM.
 
-This went further than "it's still locked" suggests.
+## 2. The CAN bus and the diagnostic back door
 
-I built a CAN/UDS adapter from an ESP32 and a two-dollar transceiver, no existing adapter,
-no vendor tooling, and used it to find and talk to the radio's diagnostic endpoint over its
-CAN bus. Then I broke the radio's SecurityAccess scheme (UDS 0x27) outright: identified
-Ford's legacy 24-bit LFSR algorithm, found the specific 5-byte secret this radio uses by
-trying a public keybag of candidates against it, and now the bootloader's security layer
-unlocks deterministically, every time.
+The radio speaks UDS over CAN at 125 kbit/s and sleeps the bus within a second of
+silence, which is its own little war. I built the adapter from an ESP32 and a
+SN65HVD230 transceiver, and getting a stable session took a firmware-level keepalive
+plus an ISO-TP/UDS client I wrote to handle `responsePending`, stale frames and
+dropped requests. `esp32/` has all of it.
 
-Getting a stable diagnostic session took its own work, this radio sleeps its CAN bus within
-about a second of silence, so I built a firmware-level keepalive and an ISO-TP/UDS client
-that handles responsePending, stale frames, and dropped requests, to hold the connection
-open indefinitely. With that in place, I confirmed the radio boots into its Primary Boot
-Loader on command, and mapped every UDS service it exposes there.
+Once sessions were stable, two things fell out quickly:
 
-The biggest find: the bootloader will accept arbitrary bytes written to any address in the
-processor's internal RAM over CAN. That's a real code-injection foothold into a locked
-automotive ECU, reached with nothing but UDS requests. I then mapped what that foothold
-*can't* do just as thoroughly, not as a guess: swept the entire 16-bit RoutineControl ID
-space, all of it, and found exactly three routines, all flash program/erase related, none
-of them a way to run the code sitting in RAM. Tested ECUReset too, as a different possible
-execution path, with an actual controlled experiment behind it (a second, independent
-channel, an EEPROM emulator's own access counter, to detect whether execution diverted).
-Clean, reproducible negative: ECUReset doesn't trigger it either.
+**SecurityAccess (UDS 0x27) broke completely.** The bootloader uses Ford's legacy
+24-bit LFSR scheme with a 5-byte secret. I brute-forced a public keybag of candidate
+secrets against the module, there was hardly any rate limiting to speak of, and this
+radio's own secret fell out of it. From then on the diagnostic session unlocked
+deterministically. And here is the first big lesson of the project: it did not matter
+at all. The diagnostic lock and the consumer lock are two different things. The method
+is described in `DOCUMENTATION.md`; the crack tooling itself has been removed from
+this repo, see the legal notes at the end.
 
-On the JTAG side, I reached the TAP directly over an FT232H and got a reliable chip ID read
-(`0x3100e02f`), proving JTAG is physically alive on the board. I also ran down why it can't
-go further: this TI chip family uses a proprietary dual-TAP debug-scan protocol that
-open-source JTAG tooling doesn't implement, confirmed against TI's own support forum
-threads on sibling chips, not just assumed from the symptoms.
+**The bootloader accepts arbitrary writes to internal RAM.** Any address, any bytes,
+over CAN, using nothing but UDS. That is a genuine code-injection foothold into a
+locked automotive ECU. It is also, on this unit, unusable: I swept the entire 16-bit
+RoutineControl ID space and found exactly three routines, all flash program/erase
+related, none of them a way to execute what I had just loaded into RAM. I excluded
+ECUReset as an execution path too, with a controlled experiment: the EEPROM
+emulator's own access counter served as an independent witness that no execution
+diverted. Clean, reproducible negative.
 
-I soldered a tap onto an undocumented debug UART pin on the board, found by testing pin
-voltages directly rather than from any datasheet (the pin isn't even routed anywhere on the
-PCB), and built a baud-finder and sniffer for it. Turned out to carry binary inter-module
-traffic rather than a debug console, but the tap and the method of finding it are real,
-reusable results regardless.
+I also soldered a tap onto an undocumented debug UART pin, which I found by probing
+voltages rather than reading schematics (the pin is not routed anywhere on the PCB).
+It turned out to carry binary inter-module traffic, not a debug console, but the tap
+and the baud-finder are in the repo and the method generalizes.
 
-And I properly ruled out the EEPROM as the lock's location: live-emulated the radio's
-external 24C16 from a Raspberry Pi Pico, so its contents could be edited while the radio
-ran against it rather than just read once, and a completely blank EEPROM still left the
-radio showing LOCKED. The lock lives inside the processor's own flash, not the chip most
-guides assume.
+## 3. The wrong turn that cost the most time
 
-Every claim above is backed by command-by-command logs and working scripts in this repo,
-see `DOCUMENTATION.md` for the dated, detailed record behind each one.
+Early on I ruled out the EEPROM. The reasoning looked solid at the time: a Pico
+live-emulated the 24C16, the radio ran against a completely blank chip, and the radio
+still showed `LOCKED`. Conclusion: the lock lives in the processor, the EEPROM is
+just settings.
 
-## Where I'm actually stuck
+That was wrong, and the way it was wrong taught me more than the right answer would
+have. A blank EEPROM does not test the lock. It tests the boot. Against an empty chip
+the radio's boot degrades so badly that the lock question never even gets asked. The
+lock data sat in the EEPROM the entire time, in a small block my early emulation was
+not reproducing correctly. It took coming back weeks later, with a fully working
+radio, full I2C control and a complete traffic capture, to finally see it. Section 8
+has the details. That mistake cost me about a month.
 
-The TMS470 (TI ARM7TDMI, 384KB flash) has a hardware security module gating its flash
-behind a 128-bit password that isn't recoverable by analysis, it's not derivable from
-anything public, and brute-forcing 128 bits isn't realistic the way the 40-bit UDS secret
-was. I tried two independent doors into that flash, and both are shut for confirmed,
-specific reasons, not abandoned early:
+## 4. JTAG: the part everyone said was impossible
 
-- **Over CAN**, the bootloader runs a handful of specific flash routines (needed for
-  official reflashing) but has no general "execute arbitrary code" entry point, confirmed
-  by exhausting the entire RoutineControl ID space.
-- **Over JTAG**, the debug port needs TI's own proprietary scan protocol that no open tool
-  speaks, so halting the core (required to read anything) isn't possible with generic
-  hardware.
+The TMS470 family is known for its memory security module: a 128-bit password gating
+flash. Earlier writeups, including my own early notes, claimed the debug port needs
+TI's proprietary dual-TAP scan protocol that open tools cannot speak. For this part
+that claim turned out to be wrong: an FT232H plus OpenOCD halted, resumed and read
+this chip reliably for weeks. `jtag/` has the configs and the pin map.
 
-One lead I haven't tried yet: a forum report of someone getting an actual flash readback on
-this exact chip using genuine SEGGER J-Link hardware and a specific J-Flash project setting
-("Activate mapping"), see `DOCUMENTATION.md` section 5.11. I don't have real J-Link hardware
-to try it with.
+With JTAG up, I mapped the running application in SRAM:
 
-## If you know something about this
+- module state cell `0x1035BC`: 6 = LOCKED, 2 = normal operation
+- screen mode cell `0x1035C0`: 3 = the LOCKED screen, 0 = normal
+- status byte `0x1038A8`, whose bit 0 arms the event that drives the LOCKED path
+- service latch `0x100820`, the marker written by the diagnostic service-grant path
 
-If you've worked with TMS470/TMS470R1 debug internals, have the real Ford/Visteon Secondary
-Bootloader (SBL) for this module (part no. `6M2T-18C815-AG` / `6M2T-14C230-AF`), have a
-genuine J-Link and want to try the lead above, or just want to poke at a RAM-write primitive
-on a real automotive ECU, open an issue, or fork it and run with it. Everything needed to
-reproduce every step here is in this repo.
+In flash, I located the memory security module's key rows and reproduced the unlock
+ladder on real hardware. After the ladder, flash reads and writes worked and I could
+dump the whole 384 KB, diff it and actually understand what was in there.
 
-## What's in this repo
+## 5. The flash month
 
-- `esp32/` - the DIY CAN adapter (ESP32 + SN65HVD230) built from scratch to talk UDS to the
-  radio, plus a passive SCI/UART sniffer added later. `esp32/esp32_slcan/esp32_slcan.ino`
-  is the firmware.
-- `security/` - the SecurityAccess crack and every bootloader/RAM-exploit probe tried
-  (RequestDownload/Upload, the full RoutineControl ID sweep, the controlled ECUReset
-  experiment, etc).
-- `jtag/` - OpenOCD configs for direct JTAG access and a pin-mapped photo of the board.
-- `pico-eeprom-emulator/` - a Raspberry Pi Pico W used as a live 24C16 EEPROM emulator, to
-  read/write/log the radio's EEPROM traffic without desoldering the original chip.
-- `can/`, `captures/`, `eeprom-experiments/` - earlier-stage CAN tooling and EEPROM logs.
-- `eeprom-dumps/` - this specific radio's own 24C16 contents (not firmware, just config/
-  presets/calibration bytes).
-- `images/` - photos of the physical setup at various stages: the CH341A/SOIC8 EEPROM
-  reader, the Pico soldered in as a live EEPROM emulator (with the TMS470 chip visible on
-  the board), the two Visteon boards connected together, the JTAG test points wired up, the
-  FT232H JTAG adapter, and the full bench with everything connected at once.
-- `DOCUMENTATION.md` - the full, dated, command-by-command technical record. Start there
-  for the real detail behind every claim above.
+The application-level lock turned out to be a state machine, and its constants live
+in flash. So began the month of surgical patches. Each one was reasoned through,
+simulated offline where possible, and reversible on paper: marker bytes in the boot
+sector that the boot compares against SRAM state, an authorization word in the
+identity sector, the state machine's own constants in the application sector, and
+eventually a carefully designed interrupt trampoline to drive the event system from
+the IRQ path, verified in an emulator for hundreds of millions of instructions before
+I touched the hardware.
 
-## Hardware
+The result: every single boot-visible flash modification bricked the boot. Not most
+of them. All of them. The boot chain on this unit reads and validates its sectors so
+tightly that even a byte change in a region that looks unused broke the power-on
+sequence. The trampoline, simulated clean end to end offline, broke the real boot
+twice.
 
-- Ford Galaxy Mk3 (~2012), radio Ford 6000CD by Visteon, board `VISTEON PWB 14041`.
-- Processor: TI `TMS470AVF689APZA` (ARM7TDMI, 384KB flash, 16KB SRAM, big-endian).
-- EEPROM: 24C16 in SOT23-5.
+I recovered from those bricks the hard way. One application sector ended up partially
+erased mid-session and I had to rebuild it halfword by halfword over JTAG from a
+stock reference image, verifying every write before moving on. By the end my working
+discipline was: dump the full 384 KB flash before and after every session, diff it
+byte-exact, and revert anything that boots badly the same day. That discipline is the
+only reason the radio survived this phase.
 
-## References
+When the dust settled I had complete understanding of the lock mechanism, a volatile
+unlock (next section), and a radio that boots exactly stock. The flash was a dead end
+for permanence, but the reason why is documented for the next person.
 
-- Texas Instruments, *TMS470R1x Memory Security Module Reference Guide* (literature no.
-  SPNU243): <https://ti.com/lit/pdf/spnu243>
-- Texas Instruments, *TMS470R1VF689, TMS470R1VF688 16/32-Bit RISC Flash Microcontrollers*
-  datasheet (literature no. SPNS001) - TI's own listing for this specific part has since
-  been taken down (it's long discontinued); search TI's literature database for "SPNS001"
-  or the part number.
-- jakka351 - [profile](https://github.com/jakka351) /
-  [Ford-ECU-Bruteforcer](https://github.com/jakka351/Ford-ECU-Bruteforcer): source of the
-  Ford legacy SecurityAccess seed/key algorithm this project's `keygen_ford.py` ports, and
-  of the candidate-secret keybag used to find this radio's specific secret.
-- fordradv3 ("VISTEON CAR RADIO TOOL") - the commercial Ford/Visteon radio-code tool this
-  project's CAN/UDS protocol was partly understood by observing.
+## 6. The volatile unlock
+
+With JTAG, while the radio is halted, four SRAM writes unlock it completely:
+
+```
+mww 0x100820 0x55AACC33    # service latch: the service-grant marker
+mww 0x1038A8 0xCA          # status byte: clear bit 0, disarms the LOCKED event path
+mww 0x1035BC 0x00000002    # module state: 6 (LOCKED) -> 2 (normal)
+mww 0x1035C0 0x00000000    # screen mode: 3 (LOCKED screen) -> 0
+```
+
+Resume, and the radio is fully unlocked: normal display, responsive buttons, working
+tuner. It reverts on every power cycle, because SRAM. This was never going to be the
+fix. Its value was proof: I understood the lock mechanism end to end now, and the map
+pointed at where permanence had to come from.
+
+## 7. Back to the EEPROM, with eyes open
+
+This time I went back with the radio fully working, the Pico owning the EEPROM chip
+entirely, and a logger capturing every transaction. The traffic told a clear story.
+On every boot the radio reads its settings sweep: presets, region data, and a small
+block it reads before almost anything else. During operation it rewrites its settings
+block over and over, byte for byte identical each time.
+
+The lock lives in that small early-read block:
+
+| Address | Meaning |
+|---|---|
+| `0x14C-0x14D` | accept token: `97 77` means a code was accepted for this unit |
+| `0x14E-0x171` | padding and flags, all `00` in the accepted state |
+| `0x172` | attempt counter: `00` means no failed attempts standing |
+| `0x175` | second status byte, also `00` |
+| `0x176-0x179` | lock block checksum: `00 00 00 00` validates the unlocked state |
+
+The proof came from a snapshot I had captured weeks earlier, in the window where the
+radio had actually accepted the correct code once. That image held exactly the state
+above, and loading it back made the radio boot unlocked. The answer had been sitting
+in my own captures the whole time.
+
+## 8. The permanent fix
+
+The permanent fix was three moves:
+
+1. **The Pico becomes the EEPROM.** I pulled the physical 24C16 off the board and
+   the Pico drives the same I2C bus from the radio's own 3.3V rail (VSYS to 3.3V,
+   GND to GND, GP16 to SDA, GP17 to SCL). Replacing a dead EEPROM is a standard
+   repair; this one just never has to end.
+2. **The image is merged, not replaced.** The accepted-state lock block is combined
+   with the original settings image, so the radio boots unlocked and keeps its own
+   bass, treble, clock and presets. The first merge attempt showed `UNCONFIGURED` on
+   boot, which taught me the checksum spans more than the lock block. The working
+   merge keeps the accepted-state block intact and copies only the settings regions
+   around it.
+3. **The lock block becomes read-only in the emulator.** `pico-eeprom-emulator/emu.py`
+   silently skips any write targeting `0x14C-0x179` while still ACKing the
+   transaction, so the radio believes its writes succeeded and can never re-lock
+   itself. Every other address stays writable, so settings keep saving normally while
+   you use the radio. Turn it off normally after changing settings; the emulator
+   flushes on bus idle.
+
+No flash was modified. Nothing was erased. The processor cannot tell its EEPROM from
+the Pico, and the lock block can no longer change.
+
+## 9. In the car
+
+I put the radio back into the Galaxy and it has run flawlessly since: normal display
+on every boot, buttons working, tuner working, settings persisting across power
+cycles. On the bench it shows `UNCONFIGURED` when booted outside the car. That is
+the unit's normal bench behavior, not a fault.
+
+## 10. What I took away from this
+
+- Change one thing at a time. My blank-EEPROM experiment changed too much at once and
+  hid the right answer for a month.
+- The obvious security layer is often not the real one. Breaking UDS SecurityAccess
+  completely was satisfying, and completely useless for the actual lock.
+- Flash-boot coupling can be absolute. I could not change a single boot-visible flash
+  byte on this unit without breaking the boot, including changes that simulated
+  perfectly. Simulation covers logic, not whatever the boot actually validates.
+- Live emulation beats dumps. A static dump shows bytes; a live emulator lets the
+  radio's own behavior tell you which bytes matter. That is what finally cracked it.
+- Log everything and revert everything. I could undo two erased sectors only because
+  every session ended with a byte-exact dump and diff.
+
+## 11. Legal and ethics
+
+This was a repair of my own property, with the correct code known and in hand. This
+writeup describes the repair path for an owner of record. Anyone without physical
+access to the unit, disassembly skill and ownership gets nothing from it. Reaching
+the EEPROM in the final step requires physically desoldering the radio's EEPROM and
+wiring a microcontroller to its bus.
+
+No Ford or Visteon firmware is published here. There are no flash dumps, no binaries
+and no disassembly listings. I never released the processor's flash. The EEPROM
+images in `eeprom-dumps/` are this radio's own configuration data, the locked
+starting state, kept as evidence of where the project began. I did not publish any
+unlocked EEPROM image; the text above explains how the accepted state was
+reconstructed and why.
+
+The UDS SecurityAccess crack tooling (the seed/key generator and the keybag
+brute-forcer) existed in early versions of this repo and I have removed it from the
+history. The algorithm it used is documented publicly elsewhere. What this repo keeps
+is the finding that mattered: the diagnostic lock is not the consumer lock.
+
+The idea that car-radio lock state can live in the EEPROM is not new. The repair
+community has known it for decades, and dealers reset these units routinely from the
+serial number. What I've added here is an open, reproducible method and an honest
+account of every path that did not work.
+
+## 12. What's in this repo
+
+- `esp32/` - the DIY CAN adapter (ESP32 + SN65HVD230), the UDS client, the keepalive,
+  the SCI/UART sniffer. `esp32/esp32_slcan/esp32_slcan.ino` is the firmware.
+- `jtag/` - OpenOCD configs for direct JTAG access and a pin-mapped board photo.
+- `pico-eeprom-emulator/` - the final unlock. `emu.py` is the 24C16 emulator with the
+  read-only lock block; `main.py` handles settings flush; `orig.bin` is the locked
+  starting image.
+- `can/`, `captures/`, `eeprom-experiments/` - CAN tooling, protocol logs, EEPROM logs.
+- `eeprom-dumps/` - this radio's own 24C16 contents, the locked state (config,
+  presets, calibration, not firmware).
+- `images/` - photos of the physical setup at every stage.
+- `DOCUMENTATION.md` - the full dated command-by-command record. Start there for the
+  detail behind every claim above.
+
+## 13. Hardware
+
+- Ford Galaxy Mk3 (~2012), radio Ford 6000CD by Visteon, board `VISTEON PWB 14041`
+- Processor: TI `TMS470AVF689APZA` (ARM7TDMI, 384KB flash, 16KB SRAM, big-endian)
+- EEPROM: 24C16 in SOT23-5, permanently replaced by a Raspberry Pi Pico
+
+## 14. References
+
+- Texas Instruments, *TMS470R1x Memory Security Module Reference Guide* (SPNU243):
+  <https://ti.com/lit/pdf/spnu243>
+- Texas Instruments, *TMS470R1VF689/688* datasheet (SPNS001). The part is long
+  discontinued; search TI's literature database for the literature number.
+- jakka351 - [Ford-ECU-Bruteforcer](https://github.com/jakka351/Ford-ECU-Bruteforcer),
+  the public keybag used during the SecurityAccess phase (tooling removed here, the
+  algorithm documentation lives there).
+- fordradv3 ("VISTEON CAR RADIO TOOL"), the commercial tool whose cable-side protocol
+  was partly understood by observation, see `DOCUMENTATION.md` section 6.
 
 ## License
 
-This project's own code and writeup are released under the MIT license (see `LICENSE`),
-except where a file says otherwise (the Ford seed/key algorithm port, see the credit in
-`security/keygen_ford.py` and the References section above).
+This project's own code and writeup are released under the MIT license, see
+`LICENSE`.

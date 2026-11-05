@@ -145,17 +145,18 @@ def _run(mem_p: ptr8, log_p: ptr8, ctl_p: ptr32):
                 elif st == 3:
                     if bitcnt == 8:
                         addr = (block << 8) | word
-                        mem_p[addr] = shift & 0xff
-                        lh = loghead
-                        log_p[lh] = 0x57
-                        log_p[lh + 1] = addr >> 8
-                        log_p[lh + 2] = addr & 0xff
-                        log_p[lh + 3] = shift & 0xff
-                        loghead = (lh + 4) & 0x3fff
-                        ctl_p[1] = loghead
-                        ctl_p[3] = int(ctl_p[3]) + 1
-                        word = (word + 1) & 0xff
-                        OE_SET[0] = sda_m        # ACK
+                        if addr < 0x14C or addr > 0x179:   # lock block 0x14C-0x179 is read-only
+                            mem_p[addr] = shift & 0xff
+                            lh = loghead
+                            log_p[lh] = 0x57
+                            log_p[lh + 1] = addr >> 8
+                            log_p[lh + 2] = addr & 0xff
+                            log_p[lh + 3] = shift & 0xff
+                            loghead = (lh + 4) & 0x3fff
+                            ctl_p[1] = loghead
+                            ctl_p[3] = int(ctl_p[3]) + 1
+                        word = (word & 0xf0) | ((word + 1) & 0x0f)   # 24C16: writes wrap in the 16-byte page
+                        OE_SET[0] = sda_m        # ACK (always ACK so radio I2C doesn't hang)
                         acking = 1
                         bitcnt = 0; shift = 0
                 elif st == 4:

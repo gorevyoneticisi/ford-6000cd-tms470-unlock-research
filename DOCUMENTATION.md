@@ -5,8 +5,13 @@ the protocol analysis alongside me, see the README for more on that. Everything 
 factual record of what was tried, what was found, and what is still unknown, kept so the
 work could be picked up again without starting over.
 
-> **Note on this published version:** a few paths mentioned below aren't included in this
-> repo as published. See the [README](README.md#references) for sources and credits.
+> **Note on this published version:** this is the historical session log, kept as it was
+> written. The UDS SecurityAccess crack tooling (`security/keygen_ford.py`,
+> `security/seedkey_brute.py`, `security/unlock_and_read.py`, and the probes that depended
+> on them) has been removed from the repo; the file paths below are kept as historical
+> references, and the method is described in prose instead. The lock was ultimately found
+> in the EEPROM, not in flash - see the [README](README.md) and
+> [docs/journey.md](docs/journey.md) for the resolved outcome.
 
 ---
 
